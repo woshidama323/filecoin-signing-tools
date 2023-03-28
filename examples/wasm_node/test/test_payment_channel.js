@@ -1,17 +1,20 @@
-// Test twice for wasm version and pure js version
-if (process.env.PURE_JS) {
-  var filecoin_signer = require('@zondax/filecoin-signing-tools/js')
-} else {
-  var filecoin_signer = require('@zondax/filecoin-signing-tools')
-}
+import * as filecoin_signer_js from '@zondax/filecoin-signing-tools/js'
+import filecoin_signer_wasm from '@zondax/filecoin-signing-tools'
 
-const bip39 = require('bip39')
-const bip32 = require('bip32')
-const { getDigest, getDigestVoucher, blake2b256 } = require('./utils')
-const secp256k1 = require('secp256k1')
-const fs = require('fs')
-const assert = require('assert')
-const cbor = require('@ipld/dag-cbor')
+import * as bip32Default from 'bip32'
+import * as ecc from 'tiny-secp256k1';
+import fs from 'fs'
+import assert from 'assert'
+import * as cbor from '@ipld/dag-cbor'
+import secp256k1 from 'secp256k1'
+
+import { getDigest, getDigestVoucher } from './utils.js'
+
+const bip32 = bip32Default.BIP32Factory(ecc)
+
+// Test twice for wasm version and pure js version
+let filecoin_signer = process.env.PURE_JS ? filecoin_signer_js : filecoin_signer_wasm
+
 
 /* Load wallet test data */
 let rawdataWallet = fs.readFileSync('../../test_vectors/wallet.json')
@@ -61,20 +64,7 @@ describeCall('createPymtChan', function() {
       Params: Buffer.from(serialized_params).toString('base64')
     }
 
-
-    /*let create_pymtchan = filecoin_signer.createPymtChanWithFee(
-      paymentchannel_create.constructor_params["From"],
-      paymentchannel_create.constructor_params["To"],
-      paymentchannel_create.message["Value"],
-      paymentchannel_create.message["Nonce"],
-      paymentchannel_create.message["GasLimit"].toString(),
-      paymentchannel_create.message["GasFeeCap"],
-      paymentchannel_create.message["GasPremium"],
-      "mainnet"
-    )*/
-
     let signedMessage = filecoin_signer.transactionSignLotus(create_pymtchan, paymentchannel_create.private_key)
-    signedMessage = JSON.parse(signedMessage)
 
     assert.deepStrictEqual(paymentchannel_create.message.params, create_pymtchan.params)
 
@@ -115,19 +105,7 @@ describeCall('createPymtChan', function() {
       Params: Buffer.from(serialized_params).toString('base64')
     }
 
-    /*let create_pymtchan = filecoin_signer.createPymtChanWithFee(
-      paymentchannel_create.constructor_params["From"],
-      paymentchannel_create.constructor_params["To"],
-      paymentchannel_create.message["Value"],
-      paymentchannel_create.message["Nonce"],
-      paymentchannel_create.message["GasLimit"].toString(),
-      paymentchannel_create.message["GasFeeCap"],
-      paymentchannel_create.message["GasPremium"],
-      "mainnet"
-    )*/
-
     let signedMessage = filecoin_signer.transactionSignLotus(create_pymtchan, paymentchannel_create.private_key)
-    signedMessage = JSON.parse(signedMessage)
 
     assert.deepStrictEqual(paymentchannel_create.message["Params"], create_pymtchan["Params"])
 
@@ -163,18 +141,7 @@ describeCall('updatePymtChan', function() {
       Params: Buffer.from(serialized_params).toString('base64')
     }
 
-    /*let update_pymtchan = filecoin_signer.updatePymtChanWithFee(
-      paymentchannel_update.message["To"],
-      paymentchannel_update.message["From"],
-      paymentchannel_update.voucher_base64,
-      paymentchannel_update.message["Nonce"],
-      paymentchannel_update.message["GasLimit"].toString(),
-      paymentchannel_update.message["GasFeeCap"],
-      paymentchannel_update.message["GasPremium"],
-    )*/
-
     let signedMessage = filecoin_signer.transactionSignLotus(update_pymtchan, paymentchannel_update.private_key)
-    signedMessage = JSON.parse(signedMessage)
 
     assert.deepStrictEqual(paymentchannel_update.message, update_pymtchan)
 
@@ -206,18 +173,7 @@ describeCall('settlePymtChan', function() {
       Params: ''
     }
 
-
-    /*let settle_pymtchan = filecoin_signer.settlePymtChanWithFee(
-      paymentchannel_settle.message["To"],
-      paymentchannel_settle.message["From"],
-      paymentchannel_settle.message["Nonce"],
-      paymentchannel_settle.message["GasLimit"].toString(),
-      paymentchannel_settle.message["GasFeeCap"],
-      paymentchannel_settle.message["GasPremium"],
-    )*/
-
     let signedMessage = filecoin_signer.transactionSignLotus(settle_pymtchan, paymentchannel_settle.private_key)
-    signedMessage = JSON.parse(signedMessage)
 
     assert.deepStrictEqual(paymentchannel_settle.message, settle_pymtchan)
 
@@ -247,17 +203,7 @@ describeCall('collectPymtChan', function() {
       Params: ''
     }
 
-    /*let collect_pymtchan = filecoin_signer.collectPymtChanWithFee(
-      paymentchannel_collect.message["To"],
-      paymentchannel_collect.message["From"],
-      paymentchannel_collect.message["Nonce"],
-      paymentchannel_collect.message["GasLimit"].toString(),
-      paymentchannel_collect.message["GasFeeCap"],
-      paymentchannel_collect.message["GasPremium"],
-    )*/
-
     let signedMessage = filecoin_signer.transactionSignLotus(collect_pymtchan, paymentchannel_collect.private_key)
-    signedMessage = JSON.parse(signedMessage)
 
     assert.deepStrictEqual(paymentchannel_collect.message, collect_pymtchan)
 

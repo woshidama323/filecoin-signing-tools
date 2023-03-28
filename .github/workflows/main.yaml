@@ -16,21 +16,25 @@ jobs:
 
   build:
     needs: [ configure ]
-    container:
-      image: zondax/rust-ci:latest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
+      - name: Install latest stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
       - name: Restore/Save sscache
         uses: actions/cache@v2
         with:
           path: |
             ~/.cache/sccache
           key: ${{ runner.os }}-${{ github.run_id }}-${{ needs.configure.outputs.datetime }}
-      - run: apt-get update -y && apt-get install -y libusb-1.0.0 libudev-dev
+      - run: sudo apt-get update -y && sudo apt-get install -y libusb-1.0.0 libudev-dev
       - name: rustfmt
         run: |
           cargo fmt --version
@@ -38,7 +42,7 @@ jobs:
       - name: clippy
         run: |
           cargo clippy --version
-          cargo clippy --all-features --all-targets 
+          cargo clippy --all-features --all-targets
       #- name: audit
       #  run: |
       #    cargo audit --version
@@ -48,20 +52,23 @@ jobs:
   tests_rust:
     needs: [ configure, build ]
     runs-on: ubuntu-latest
-    container:
-      image: zondax/rust-ci:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
+      - name: Install latest stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
       - name: Restore/Save sscache
         uses: actions/cache@v2
         with:
           path: |
             ~/.cache/sccache
           key: ${{ runner.os }}-${{ github.run_id }}-${{ needs.configure.outputs.datetime }}
-      - run: apt-get update -y && apt-get install -y libusb-1.0.0 libudev-dev
+      - run: sudo apt-get update -y && sudo apt-get install -y libusb-1.0.0 libudev-dev
       - name: rust unit tests --all-features
         env:
           LOTUS_SECRET_URL: ${{ secrets.LOTUS_SECRET_URL }}
@@ -75,13 +82,16 @@ jobs:
   tests_ffi:
     needs: [ configure, build ]
     runs-on: ubuntu-latest
-    container:
-      image: zondax/rust-ci:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
       - name: Restore/Save sscache
         uses: actions/cache@v2
         with:
@@ -90,7 +100,7 @@ jobs:
           key: ${{ runner.os }}-${{ github.run_id }}-${{ needs.configure.outputs.datetime }}
       - name: External dependencies
         run: |
-          apt update && apt-get install -y clang default-jdk g++ gcc gnustep gnustep-devel gobjc golang libicu-dev libtinfo5 valgrind zip
+          sudo apt update && sudo apt-get install -y clang default-jdk g++ gcc gnustep gnustep-devel gobjc golang libicu-dev libtinfo5 valgrind zip
       - name: Cbindgen
         run: |
           cd signer-ffi
@@ -119,13 +129,16 @@ jobs:
   tests_npm:
     needs: [ configure, build ]
     runs-on: ubuntu-latest
-    container:
-      image: zondax/rust-ci:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
       - run: cargo --version
       - name: Restore/Save sscache
         uses: actions/cache@v2
@@ -133,11 +146,11 @@ jobs:
           path: |
             ~/.cache/sccache
           key: ${{ runner.os }}-${{ github.run_id }}-${{ needs.configure.outputs.datetime }}
-      - run: apt-get update && apt-get install -y firefox-esr libnss3
-      - run: make install_wasmpack SILENT=true
       - run: |
-          chown -R root:root /github/home
-          chown -R root:root /home/github
+          sudo add-apt-repository ppa:mozillateam/ppa
+          sudo apt-get update && sudo apt-get install -y firefox-esr libnss3
+      - run: npm install -g yalc
+      - run: make install_wasmpack SILENT=true
       # Disabling Chrome (only Firefox) due to  https://github.com/Zondax/filecoin-signing-tools/issues/68
       - run: make test_npm_unit
       - run: make test_npm_node
@@ -145,19 +158,23 @@ jobs:
   devnet:
     needs: [ configure, build ]
     runs-on: ubuntu-latest
-    container:
-      image: zondax/rust-ci:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           submodules: true
+      - name: Install latest stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
       - name: Restore/Save sscache
         uses: actions/cache@v2
         with:
           path: |
             ~/.cache/sccache
           key: ${{ runner.os }}-${{ github.run_id }}-${{ needs.configure.outputs.datetime }}
+      - run: npm install -g yalc
       - run: make install_wasmpack SILENT=true
       - run: make link_npm
       - run: cd examples/wasm_node && yarn test:pc

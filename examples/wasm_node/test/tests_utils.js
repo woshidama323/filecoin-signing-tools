@@ -1,8 +1,8 @@
-const secp256k1 = require('secp256k1')
-const blake = require('blakejs')
-const utils = require('./utils')
-const assert = require('assert')
-const fs = require('fs')
+import assert from 'assert'
+import secp256k1 from 'secp256k1'
+import fs from 'fs'
+
+import * as utils from './utils.js'
 
 let rawdata = fs.readFileSync('../../test_vectors/utils.json')
 let data = JSON.parse(rawdata)
@@ -19,7 +19,7 @@ describe('Test for utils.js', function() {
     assert.strictEqual(calculatedCid.toString('hex'), data.cid_bytes.cid)
   })
 
-  for (i in data.msg_digest) {
+  for (let i in data.msg_digest) {
     it(`msgDigest n°${i}`, function() {
       const message = Buffer.from(data.msg_digest[i].cbor_message, 'hex')
 

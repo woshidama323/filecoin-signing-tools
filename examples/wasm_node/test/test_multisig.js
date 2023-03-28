@@ -1,16 +1,15 @@
-// Test twice for wasm version and pure js version
-if (process.env.PURE_JS) {
-  var filecoin_signer = require('@zondax/filecoin-signing-tools/js')
-} else {
-  var filecoin_signer = require('@zondax/filecoin-signing-tools')
-}
+import * as filecoin_signer_js from '@zondax/filecoin-signing-tools/js'
+import filecoin_signer_wasm from '@zondax/filecoin-signing-tools'
 
-const bip39 = require('bip39')
-const bip32 = require('bip32')
-const { getDigest, getDigestVoucher, blake2b256 } = require('./utils')
-const secp256k1 = require('secp256k1')
-const fs = require('fs')
-const assert = require('assert')
+import * as bip32Default from 'bip32'
+import * as ecc from 'tiny-secp256k1';
+import fs from 'fs'
+import assert from 'assert'
+
+const bip32 = bip32Default.BIP32Factory(ecc)
+
+// Test twice for wasm version and pure js version
+let filecoin_signer = process.env.PURE_JS ? filecoin_signer_js : filecoin_signer_wasm
 
 /* Load wallet test data */
 let rawdataWallet = fs.readFileSync('../../test_vectors/wallet.json')
@@ -105,7 +104,7 @@ describeCall('createMultisig', function() {
 
     let signature = filecoin_signer.transactionSignLotus(multisig_create.message, privateKey)
 
-    assert(JSON.parse(signature).Signature)
+    assert(signature.Signature)
   })
 
   it('should fail because of bigint', function() {
@@ -170,9 +169,7 @@ describeCall('proposeMultisig', function() {
 
     let signature = filecoin_signer.transactionSignLotus(multisig_propose.message, privateKey)
 
-    console.log(signature)
-
-    assert(JSON.parse(signature).Signature)
+    assert(signature.Signature)
   })
 })
 
@@ -232,7 +229,7 @@ describeCall('approveMultisig', function() {
 
     let signature = filecoin_signer.transactionSignLotus(multisig_approve.message, privateKey)
 
-    assert(JSON.parse(signature).Signature)
+    assert(signature.Signature)
   })
 })
 
@@ -288,7 +285,7 @@ describeCall('cancelMultisig', function() {
 
     let signature = filecoin_signer.transactionSignLotus(multisig_cancel.message, privateKey)
 
-    assert(JSON.parse(signature).Signature)
+    assert(signature.Signature)
   })
 })
 

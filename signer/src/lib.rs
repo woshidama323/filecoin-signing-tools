@@ -1,6 +1,4 @@
 #![cfg_attr(not(test), deny(clippy::expect_used,))]
-
-use lazy_static::lazy_static;
 use std::convert::TryFrom;
 use std::str::FromStr;
 
@@ -13,41 +11,32 @@ use num_traits::FromPrimitive;
 use rayon::prelude::*;
 use zx_bip44::BIP44Path;
 
-use cid::Cid;
 use fil_actor_init::{ExecParams, Method as MethodInit};
 use fil_actor_multisig as multisig;
 use fil_actor_paych as paych;
 use fvm_ipld_encoding::{from_slice, to_vec, Cbor, RawBytes};
-use fvm_shared::address::{Address, Network, Protocol};
+use fvm_shared::address::{set_current_network, Address, Network, Protocol};
 
 use bls_signatures::PublicKey as BLSPublicKey;
 use libsecp256k1::PublicKey as SECP256K1PublicKey;
 
 use extras::signed_message::ref_fvm::SignedMessage;
-use regex::bytes::Regex;
 
+use cid::multihash::MultihashDigest;
+use fvm_ipld_encoding::DAG_CBOR;
 use fvm_shared::econ::TokenAmount;
 use fvm_shared::MethodNum;
 
 use crate::api::{MessageParams, MessageTx, MessageTxAPI, MessageTxNetwork};
-use crate::code_cid::{actor_code_included, ACTOR_CODE_CIDS};
 use crate::error::SignerError;
 use crate::extended_key::ExtendedSecretKey;
 use crate::multisig_deprecated::ConstructorParamsV1;
 
 pub mod api;
-pub mod code_cid;
 pub mod error;
 pub mod extended_key;
 pub mod multisig_deprecated;
 pub mod utils;
-
-lazy_static! {
-    static ref OLD_CODE_CID_INIT: Regex = Regex::new(r"fil/[0-7]/init").unwrap();
-    static ref OLD_CODE_CID_MULTISIG: Regex = Regex::new(r"fil/[2-7]/multisig").unwrap();
-    static ref OLD_CODE_CID_PAYMENTCHANNEL: Regex =
-        Regex::new(r"fil/[2-7]/paymentchannel").unwrap();
-}
 
 /// Mnemonic string
 pub struct Mnemonic(pub String);
@@ -185,15 +174,17 @@ pub fn key_derive(
 
     let bip44_path = BIP44Path::from_string(path)?;
 
-    address.set_network(Network::Mainnet);
+    let mut network_str = "f".to_owned();
     if bip44_path.is_testnet() {
-        address.set_network(Network::Testnet);
+        network_str = "t".to_owned();
     }
+
+    let address = network_str + &address.to_string()[1..];
 
     Ok(ExtendedKey {
         private_key: PrivateKey(esk.secret_key()),
         public_key: PublicKey::SECP256K1PublicKey(SECP256K1PublicKey::parse(&esk.public_key())?),
-        address: address.to_string(),
+        address,
     })
 }
 
@@ -211,15 +202,17 @@ pub fn key_derive_from_seed(seed: &[u8], path: &str) -> Result<ExtendedKey, Sign
 
     let bip44_path = BIP44Path::from_string(path)?;
 
-    address.set_network(Network::Mainnet);
+    let mut network_str = "f".to_owned();
     if bip44_path.is_testnet() {
-        address.set_network(Network::Testnet);
+        network_str = "t".to_owned();
     }
+
+    let address = network_str + &address.to_string()[1..];
 
     Ok(ExtendedKey {
         private_key: PrivateKey(esk.secret_key()),
         public_key: PublicKey::SECP256K1PublicKey(SECP256K1PublicKey::parse(&esk.public_key())?),
-        address: address.to_string(),
+        address,
     })
 }
 
@@ -233,18 +226,19 @@ pub fn key_derive_from_seed(seed: &[u8], path: &str) -> Result<ExtendedKey, Sign
 pub fn key_recover(private_key: &PrivateKey, testnet: bool) -> Result<ExtendedKey, SignerError> {
     let secret_key = libsecp256k1::SecretKey::parse_slice(&private_key.0)?;
     let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
-    let mut address = Address::new_secp256k1(&public_key.serialize())?;
+    let address = Address::new_secp256k1(&public_key.serialize())?;
 
+    let mut network_str = "f".to_owned();
     if testnet {
-        address.set_network(Network::Testnet);
-    } else {
-        address.set_network(Network::Mainnet);
+        network_str = "t".to_owned();
     }
+
+    let address = network_str + &address.to_string()[1..];
 
     Ok(ExtendedKey {
         private_key: PrivateKey(secret_key.serialize()),
         public_key: PublicKey::SECP256K1PublicKey(public_key),
-        address: address.to_string(),
+        address: address,
     })
 }
 
@@ -263,11 +257,12 @@ pub fn key_recover_bls(
 
     let mut address = Address::new_bls(&sk.public_key().as_bytes())?;
 
+    let mut network_str = "f".to_owned();
     if testnet {
-        address.set_network(Network::Testnet);
-    } else {
-        address.set_network(Network::Mainnet);
+        network_str = "t".to_owned();
     }
+
+    let address = network_str + &address.to_string()[1..];
 
     let mut secret_key = PrivateKey([0; SECRET_KEY_SIZE]);
     secret_key.0.copy_from_slice(&sk.as_bytes());
@@ -275,7 +270,7 @@ pub fn key_recover_bls(
     Ok(ExtendedKey {
         private_key: secret_key,
         public_key: PublicKey::BLSPublicKey(sk.public_key()),
-        address: address.to_string(),
+        address,
     })
 }
 
@@ -286,7 +281,7 @@ pub fn key_recover_bls(
 /// * `message` - a filecoin message (aka transaction)
 ///
 pub fn transaction_serialize(message: &Message) -> Result<Vec<u8>, SignerError> {
-    let message_cbor = message.marshal_cbor()?;
+    let message_cbor = to_vec(message)?;
     Ok(message_cbor)
 }
 
@@ -315,8 +310,11 @@ fn transaction_sign_secp56k1_raw(
     private_key: &PrivateKey,
 ) -> Result<Signature, SignerError> {
     let secret_key = libsecp256k1::SecretKey::parse_slice(&private_key.0)?;
+    let message_ser = to_vec(message)?;
+    let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+    let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
     let message_digest =
-        libsecp256k1::Message::parse_slice(&utils::blake2b_256(&message.to_signing_bytes()))?;
+        libsecp256k1::Message::parse_slice(&utils::blake2b_256(&message_cid.to_bytes()))?;
 
     let (signature_rs, recovery_id) = libsecp256k1::sign(&message_digest, &secret_key);
 
@@ -334,7 +332,10 @@ fn transaction_sign_bls_raw(
     private_key: &PrivateKey,
 ) -> Result<Signature, SignerError> {
     let sk = bls_signatures::PrivateKey::from_bytes(&private_key.0)?;
-    let sig = sk.sign(message.to_signing_bytes());
+    let message_ser = to_vec(message)?;
+    let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+    let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
+    let sig = sk.sign(&message_cid.to_bytes());
     let signature = Signature::new_bls(sig.as_bytes());
 
     Ok(signature)
@@ -396,6 +397,7 @@ fn verify_secp256k1_signature(signature: &Signature, cbor: &Vec<u8>) -> Result<b
 
     // Should be default network here
     // FIXME: For now only testnet
+    // NOTE: It doesn't matter anymore because address don't understand network anymore. Bad.
     let tx = transaction_parse(cbor, network == Network::Testnet)?;
 
     // Decode the CBOR transaction hex string into CBOR transaction buffer
@@ -405,7 +407,6 @@ fn verify_secp256k1_signature(signature: &Signature, cbor: &Vec<u8>) -> Result<b
 
     let public_key = libsecp256k1::recover(&blob_to_sign, &signature_rs, &recovery_id)?;
     let mut from = Address::new_secp256k1(public_key.serialize().as_ref())?;
-    from.set_network(network);
 
     let tx_from = match tx {
         MessageTxAPI::Message(tx) => tx.from,
@@ -434,7 +435,10 @@ fn verify_bls_signature(signature: &Signature, cbor: &Vec<u8>) -> Result<bool, S
 
     let sig = bls_signatures::Signature::from_bytes(signature.bytes())?;
 
-    let signing_bytes = message.to_signing_bytes();
+    let message_ser = to_vec(&message)?;
+    let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+    let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
+    let signing_bytes = message_cid.to_bytes();
 
     let result = pk.verify(sig, signing_bytes);
 
@@ -472,7 +476,10 @@ fn extract_bls_signing_bytes_from_message(cbor_message: &Vec<u8>) -> Result<Vec<
     let message = transaction_parse(cbor_message, true)?;
     let unsigned_message_api = message.get_message();
 
-    Ok(unsigned_message_api.to_signing_bytes())
+    let message_ser = to_vec(&unsigned_message_api)?;
+    let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+    let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
+    Ok(message_cid.to_bytes())
 }
 
 pub fn verify_aggregated_signature(
@@ -519,294 +526,6 @@ pub fn verify_aggregated_signature(
     Ok(bls_signatures::verify(&sig, &hashes, pks.as_slice()))
 }
 
-/// Utilitary function to create a create multisig message. Return an unsigned message.
-///
-/// # Arguments
-///
-/// * `sender_address` - A string address
-/// * `addresses` - List of string addresses of the multisig
-/// * `value` - Value to send on the multisig
-/// * `required` - Number of required signatures required
-/// * `nonce` - Nonce of the message
-/// * `duration` - Duration of the multisig
-///
-#[allow(clippy::too_many_arguments)]
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn create_multisig(
-    sender_address: String,
-    addresses: Vec<String>,
-    value: String,
-    required: u64,
-    nonce: u64,
-    duration: i64,
-    start_epoch: i64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-    network: String,
-) -> Result<Message, SignerError> {
-    let from = fvm_shared::address::Address::from_str(&sender_address)?;
-    let signers_tmp: Result<Vec<fvm_shared::address::Address>, _> = addresses
-        .into_iter()
-        .map(|address_string| fvm_shared::address::Address::from_str(&address_string))
-        .collect();
-
-    let signers = match signers_tmp {
-        Ok(signers) => signers,
-        Err(_) => {
-            return Err(SignerError::GenericString(
-                "Failed to parse one of the signer addresses".to_string(),
-            ));
-        }
-    };
-
-    if duration < 0 && duration != -1 {
-        return Err(SignerError::GenericString(
-            "Invalid duration value (duration >= -1)".to_string(),
-        ));
-    };
-
-    let constructor_params_multisig = multisig::ConstructorParams {
-        signers,
-        num_approvals_threshold: required,
-        unlock_duration: duration,
-        start_epoch,
-    };
-
-    let serialized_constructor_params = RawBytes::serialize(constructor_params_multisig)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let cid_string = ACTOR_CODE_CIDS["multisig"][network]
-        .as_str()
-        .ok_or(SignerError::GenericString("network unknown".to_string()))?;
-
-    let message_params_multisig = ExecParams {
-        code_cid: Cid::from_str(cid_string)?,
-        constructor_params: serialized_constructor_params,
-    };
-
-    let serialized_params = RawBytes::serialize(message_params_multisig)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let mut init_actor_address = fvm_shared::address::Address::from_str("f01")?;
-    init_actor_address.set_network(from.network());
-
-    let multisig_create_message = Message {
-        version: 0,
-        to: init_actor_address,
-        from,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str(&value)?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: MethodInit::Exec as u64,
-        params: serialized_params,
-    };
-
-    Ok(multisig_create_message)
-}
-
-/// Utilitary function to create a proposal multisig message. Return an unsigned message.
-///
-/// # Arguments
-///
-/// * `multisig_address` - A string address
-/// * `to_address` - A string address
-/// * `from_address` - A string address
-/// * `amount` - Amount of the transaction
-/// * `nonce` - Nonce of the message
-/// * `gas_limit` - The gas limit
-/// * `gas_fee_cap` - The gas fee cap
-/// * `gas_premium` - The gas premium
-/// * `proposal_method` - The proposal method
-/// * `proposal_serialized_params` - The proposal parameters serialized
-///
-#[allow(clippy::too_many_arguments)]
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn proposal_multisig_message(
-    multisig_address: String,
-    to_address: String,
-    from_address: String,
-    amount: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-    proposal_method: u64,
-    proposal_serialized_params: String,
-) -> Result<Message, SignerError> {
-    let propose_params_multisig = multisig::ProposeParams {
-        to: fvm_shared::address::Address::from_str(&to_address)?,
-        value: fvm_shared::bigint::BigInt::from_str(&amount)?,
-        method: proposal_method,
-        params: RawBytes::new(base64::decode(proposal_serialized_params)?),
-    };
-
-    let params = RawBytes::serialize(propose_params_multisig)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let multisig_propose_message = Message {
-        version: 0,
-        to: fvm_shared::address::Address::from_str(&multisig_address)?,
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str(&"0")?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: multisig::Method::Propose as u64,
-        params,
-    };
-
-    Ok(multisig_propose_message)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn approve_or_cancel_multisig_message(
-    method: u64,
-    multisig_address: String,
-    message_id: i64,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    let requester = fvm_shared::address::Address::from_str(&proposer_address)?;
-    let proposal_parameter = multisig::ProposalHashData {
-        requester: Some(&requester),
-        to: &fvm_shared::address::Address::from_str(&to_address)?,
-        value: &fvm_shared::bigint::BigInt::from_str(&amount)?,
-        method: &0,
-        params: &RawBytes::new(Vec::new()),
-    };
-
-    let serialize_proposal_parameter = RawBytes::serialize(proposal_parameter)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-    let proposal_hash = utils::blake2b_256(&serialize_proposal_parameter);
-
-    let params_txnid = multisig::TxnIDParams {
-        id: multisig::TxnID(message_id),
-        proposal_hash: proposal_hash.to_vec(),
-    };
-
-    let params = RawBytes::serialize(params_txnid)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let multisig_unsigned_message_api = Message {
-        version: 0,
-        to: fvm_shared::address::Address::from_str(&multisig_address)?,
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str("0")?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: method,
-        params,
-    };
-
-    Ok(multisig_unsigned_message_api)
-}
-
-/// Utilitary function to create an approve multisig message. Return an unsigned message.
-///
-/// # Arguments
-///
-/// * `multisig_address` - A string address
-/// * `message_id` - message id
-/// * `proposer_address` - A string address
-/// * `to_address` - A string address
-/// * `amount` - Amount of the transaction
-/// * `from_address` - A string address
-/// * `nonce` - Nonce of the message
-///
-#[allow(clippy::too_many_arguments)]
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn approve_multisig_message(
-    multisig_address: String,
-    message_id: i64,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    approve_or_cancel_multisig_message(
-        multisig::Method::Approve as u64,
-        multisig_address,
-        message_id,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce,
-        gas_limit,
-        gas_fee_cap,
-        gas_premium,
-    )
-}
-
-/// Utilitary function to create a cancel multisig message. Return an unsigned message.
-///
-/// # Arguments
-///
-/// * `multisig_address` - A string address
-/// * `message_id` - message id
-/// * `proposer_address` - A string address
-/// * `to_address` - A string address
-/// * `amount` - Amount of the transaction
-/// * `from_address` - A string address
-/// * `nonce` - Nonce of the message
-///
-#[allow(clippy::too_many_arguments)]
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn cancel_multisig_message(
-    multisig_address: String,
-    message_id: i64,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    approve_or_cancel_multisig_message(
-        multisig::Method::Cancel as u64,
-        multisig_address,
-        message_id,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce,
-        gas_limit,
-        gas_fee_cap,
-        gas_premium,
-    )
-}
-
 /// Utilitary function to serialize parameters of a message. Return a CBOR hexstring.
 ///
 /// # Arguments
@@ -817,191 +536,6 @@ pub fn serialize_params(params: MessageParams) -> Result<Vec<u8>, SignerError> {
     let serialized_params = params.serialize()?;
     let message_cbor = serialized_params.bytes().to_vec();
     Ok(message_cbor)
-}
-
-/// Utility function to create a payment channel creation message.  Returns unsigned message.
-///
-/// # Arguments
-///
-/// * `from_address` - A string address
-/// * `to_address` - A string address
-/// * `value` - Amount to put in the payment channel initially
-/// * `nonce` - Nonce of the message; should be from_address's MpoolGetNonce() value
-///
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn create_pymtchan(
-    from_address: String,
-    to_address: String,
-    value: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-    network: String,
-) -> Result<Message, SignerError> {
-    let from = fvm_shared::address::Address::from_str(&from_address)?;
-    let to = fvm_shared::address::Address::from_str(&to_address)?;
-
-    let create_payment_channel_params = paych::ConstructorParams { from, to };
-
-    let serialized_constructor_params =
-        RawBytes::serialize::<paych::ConstructorParams>(create_payment_channel_params)
-            .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let cid_string = ACTOR_CODE_CIDS["paymentchannel"][network]
-        .as_str()
-        .ok_or(SignerError::GenericString("network unknown".to_string()))?;
-
-    let message_params_create_pymtchan = ExecParams {
-        code_cid: Cid::from_str(cid_string)?,
-        constructor_params: serialized_constructor_params,
-    };
-
-    let serialized_params = RawBytes::serialize(message_params_create_pymtchan)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    let mut init_actor_address = fvm_shared::address::Address::from_str("f01")?;
-    init_actor_address.set_network(from.network());
-
-    let pch_create_message_api = Message {
-        version: 0,
-        to: init_actor_address,
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str(&value)?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: MethodInit::Exec as u64,
-        params: serialized_params,
-    };
-
-    Ok(pch_create_message_api)
-}
-
-/// Utility function to update the state of a payment channel.  Returns unsigned message.
-///
-/// # Arguments
-///
-/// * `pch_address` - A string address
-/// * `from_address` - A string address
-/// * `signed_voucher` - A SignedVoucher to be associated with the payment channel
-/// * `nonce` - Nonce of the message; should be from_address's MpoolGetNonce() value
-///
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn update_pymtchan(
-    pch_address: String,
-    from_address: String,
-    signed_voucher: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    let sv_cbor = base64::decode(signed_voucher)?;
-
-    let sv: paych::SignedVoucher = RawBytes::deserialize(&RawBytes::new(sv_cbor))?;
-
-    let update_payment_channel_params = paych::UpdateChannelStateParams { sv, secret: vec![] };
-
-    let serialized_params = RawBytes::serialize(update_payment_channel_params)
-        .map_err(|err| SignerError::GenericString(err.to_string()))?;
-
-    // TODO:  don't hardcode gas limit and gas price; use a gas estimator!
-    let pch_update_message_api = Message {
-        version: 0,
-        to: fvm_shared::address::Address::from_str(&pch_address)?, // INIT_ACTOR_ADDR
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str("0")?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: paych::Method::UpdateChannelState as u64,
-        params: serialized_params,
-    };
-
-    Ok(pch_update_message_api)
-}
-
-/// Utility function to generate a payment channel settle message.  Returns unsigned message.
-///
-/// # Arguments
-///
-/// * `pch_address` - A string address
-/// * `from_address` - A string address
-/// * `nonce` - Nonce of the message; should be from_address's MpoolGetNonce() value
-///
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn settle_pymtchan(
-    pch_address: String,
-    from_address: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    // TODO:  don't hardcode gas limit and gas price; use a gas estimator!
-    let pch_settle_message_api = Message {
-        version: 0,
-        to: fvm_shared::address::Address::from_str(&pch_address)?,
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str("0")?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: paych::Method::Settle as u64,
-        params: RawBytes::new(vec![]),
-    };
-
-    Ok(pch_settle_message_api)
-}
-
-/// Utility function to generate a payment channel collect message.  Returns unsigned message.
-///
-/// # Arguments
-///
-/// * `pch_address` - A string address
-/// * `from_address` - A string address
-/// * `nonce` - Nonce of the message; should be from_address's MpoolGetNonce() value
-///
-#[deprecated(
-    since = "1.1.0",
-    note = "use `serialize_params` instead and then create transaction"
-)]
-pub fn collect_pymtchan(
-    pch_address: String,
-    from_address: String,
-    nonce: u64,
-    gas_limit: i64,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<Message, SignerError> {
-    // TODO:  don't hardcode gas limit and gas price; use a gas estimator!
-    let pch_collect_message = Message {
-        version: 0,
-        to: fvm_shared::address::Address::from_str(&pch_address)?,
-        from: fvm_shared::address::Address::from_str(&from_address)?,
-        sequence: nonce,
-        value: fvm_shared::econ::TokenAmount::from_str("0")?,
-        gas_limit,
-        gas_fee_cap: fvm_shared::econ::TokenAmount::from_str(&gas_fee_cap)?,
-        gas_premium: fvm_shared::econ::TokenAmount::from_str(&gas_premium)?,
-        method_num: paych::Method::Collect as u64,
-        params: RawBytes::new(vec![]),
-    };
-
-    Ok(pch_collect_message)
 }
 
 /// Sign a voucher for payment channel
@@ -1061,7 +595,14 @@ pub fn create_voucher(
     nonce: u64,
     min_settle_height: i64,
 ) -> Result<String, SignerError> {
-    let pch = fvm_shared::address::Address::from_str(&payment_channel_address)?;
+    let network: Network;
+    if payment_channel_address.starts_with("f") {
+        network = Network::Mainnet;
+    } else {
+        network = Network::Testnet;
+    }
+
+    let pch = network.parse_address(&payment_channel_address)?;
     let amount = match fvm_shared::bigint::BigInt::parse_bytes(amount.as_bytes(), 10) {
         Some(value) => value,
         None => {
@@ -1079,7 +620,7 @@ pub fn create_voucher(
         extra: None,
         lane,
         nonce,
-        amount,
+        amount: TokenAmount::from_atto(amount),
         min_settle_height,
         merges: Vec::new(),
         signature: None,
@@ -1106,9 +647,7 @@ pub fn deserialize_params(
     let serialized_params = RawBytes::new(params_decode);
 
     // Deserialize pre-FVM init actor
-    if OLD_CODE_CID_INIT.is_match(actor_type.as_bytes())
-        || actor_code_included(&actor_type, "init".to_string())
-    {
+    if actor_type.as_str() == "init" {
         match FromPrimitive::from_u64(method) {
             Some(MethodInit::Exec) => {
                 let params: ExecParams = RawBytes::deserialize(&serialized_params)?;
@@ -1116,16 +655,14 @@ pub fn deserialize_params(
             }
             _ => {
                 return Err(SignerError::GenericString(
-                    "Unknown method for actor 'fil/[0-7]/init'.".to_string(),
+                    "Unknown method for init actor.".to_string(),
                 ));
             }
         }
     }
 
     // Deserialize pre-FVM multisig actor
-    if OLD_CODE_CID_MULTISIG.is_match(actor_type.as_bytes())
-        || actor_code_included(&actor_type, "multisig".to_string())
-    {
+    if actor_type.as_str() == "multisig" {
         match FromPrimitive::from_u64(method) {
             Some(multisig::Method::Propose) => {
                 let params = serialized_params.deserialize::<multisig::ProposeParams>()?;
@@ -1165,16 +702,14 @@ pub fn deserialize_params(
             }
             _ => {
                 return Err(SignerError::GenericString(
-                    "Unknown method for actor 'fil/[2-7]/multisig'.".to_string(),
+                    "Unknown method for multisig actor.".to_string(),
                 ));
             }
         }
     }
 
     // Deserialize pre-FVM paymentchannel actor
-    if OLD_CODE_CID_PAYMENTCHANNEL.is_match(actor_type.as_bytes())
-        || actor_code_included(&actor_type, "paymentchannel".to_string())
-    {
+    if actor_type.as_str() == "paymentchannel" {
         match FromPrimitive::from_u64(method) {
             Some(paych::Method::UpdateChannelState) => {
                 let params: fil_actor_paych::UpdateChannelStateParams =
@@ -1188,7 +723,7 @@ pub fn deserialize_params(
             }
             _ => {
                 return Err(SignerError::GenericString(
-                    "Unknown method for actor 'fil/[2-7]/paymentchannel'.".to_string(),
+                    "Unknown method for paymentchannel actor.".to_string(),
                 ));
             }
         }
@@ -1212,16 +747,12 @@ pub fn deserialize_constructor_params(
     let params_decode = base64::decode(params_b64_string)?;
     let serialized_params = RawBytes::new(params_decode);
 
-    if OLD_CODE_CID_MULTISIG.is_match(code_cid.as_bytes())
-        || actor_code_included(&code_cid, "multisig".to_string())
-    {
+    if code_cid.as_str() == "multisig" {
         let params = serialized_params.deserialize::<multisig::ConstructorParams>()?;
         return Ok(MessageParams::MultisigConstructorParams(params));
     }
 
-    if OLD_CODE_CID_PAYMENTCHANNEL.is_match(code_cid.as_bytes())
-        || actor_code_included(&code_cid, "paymentchannel".to_string())
-    {
+    if code_cid.as_str() == "paymentchannel" {
         let params = serialized_params.deserialize::<paych::ConstructorParams>()?;
         return Ok(MessageParams::PaychConstructorParams(params.into()));
     }
@@ -1255,7 +786,13 @@ pub fn verify_voucher_signature(
     let decoded_voucher = base64::decode(voucher_base64_string)?;
     let signed_voucher: paych::SignedVoucher = from_slice(&decoded_voucher)?;
 
-    let address = Address::from_str(&address_signer)?;
+    let network: Network;
+    if address_signer.starts_with("f") {
+        network = Network::Mainnet;
+    } else {
+        network = Network::Testnet;
+    }
+    let address = network.parse_address(&address_signer)?;
 
     let sv_bytes = signed_voucher
         .signing_bytes()
@@ -1270,7 +807,6 @@ pub fn verify_voucher_signature(
                 let message = libsecp256k1::Message::parse(&digest);
                 let public_key = libsecp256k1::recover(&message, &sig, &recovery_id)?;
                 let mut signer = Address::new_secp256k1(public_key.serialize().as_ref())?;
-                signer.set_network(address.network());
 
                 if signer.to_string() != address.to_string() {
                     Err(SignerError::GenericString(
@@ -1353,14 +889,18 @@ pub fn compute_proposal_hash(
 pub fn get_cid(message_api: MessageTxAPI) -> Result<String, SignerError> {
     match message_api {
         MessageTxAPI::Message(message) => {
-            let cid = message.cid()?;
+            let message_ser = to_vec(&message)?;
+            let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+            let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
 
-            Ok(cid.to_string())
+            Ok(message_cid.to_string())
         }
         MessageTxAPI::SignedMessage(signed_message) => {
-            let cid = signed_message.cid()?;
+            let message_ser = to_vec(&signed_message)?;
+            let hash = cid::multihash::Code::Blake2b256.digest(&message_ser);
+            let message_cid = cid::Cid::new_v1(DAG_CBOR, hash);
 
-            Ok(cid.to_string())
+            Ok(message_cid.to_string())
         }
     }
 }

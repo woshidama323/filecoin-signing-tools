@@ -8,25 +8,25 @@
   "license": "private",
   "scripts": {},
   "dependencies": {
-    "n": "^9.0.0"
+    "n": "^9.0.1"
   },
   "devDependencies": {
-    "@ipld/dag-cbor": "^7.0.2",
-    "@types/node": "^18.7.13",
-    "@typescript-eslint/eslint-plugin": "^5.35.1",
-    "@typescript-eslint/parser": "^5.35.1",
-    "eslint": "^8.22.0",
-    "eslint-config-prettier": "^8.5.0",
-    "eslint-plugin-compat": "^4.0.2",
-    "eslint-plugin-import": "^2.26.0",
-    "eslint-plugin-jest": "^26.8.7",
-    "eslint-plugin-jsx-a11y": "^6.6.1",
+    "@ipld/dag-cbor": "^9.0.0",
+    "@types/node": "^18.15.10",
+    "@typescript-eslint/eslint-plugin": "^5.54.0",
+    "@typescript-eslint/parser": "^5.55.0",
+    "eslint": "^8.36.0",
+    "eslint-config-prettier": "^8.6.0",
+    "eslint-plugin-compat": "^4.1.2",
+    "eslint-plugin-import": "^2.27.5",
+    "eslint-plugin-jest": "^27.2.1",
+    "eslint-plugin-jsx-a11y": "^6.7.1",
     "eslint-plugin-prefer-object-spread": "^1.2.1",
     "eslint-plugin-prettier": "^4.2.1",
-    "eslint-plugin-react": "^7.31.0",
-    "multiformats": "^9.7.1",
-    "prettier": "^2.7.1",
-    "typescript": "^4.7.4"
+    "eslint-plugin-react": "^7.32.2",
+    "multiformats": "^11.0.2",
+    "prettier": "^2.8.7",
+    "typescript": "^4.9.5"
   },
   "keywords": []
 }

@@ -214,6 +214,31 @@ pub fn transaction_parse(cbor_js: JsValue, testnet: bool) -> Result<JsValue, JsV
 
     let tx = JsValue::from_serde(&message_parsed).map_err(|e| JsValue::from(e.to_string()))?;
 
+    // from_serde can't know if we are on testnet or mainnet and take a current_network value which is by default mainnet.
+    // Changing the current_network is not reliable and Filecoin removed the Address network leaving us with no way to format the address for the network we want.
+
+    if testnet {
+        let to_addr = match js_sys::Reflect::get(&tx, &"To".into())?.as_string() {
+            Some(a) => a,
+            None => return Err(JsValue::from("'To' key not fnd in message.")),
+        };
+        let from_addr = match js_sys::Reflect::get(&tx, &"From".into())?.as_string() {
+            Some(a) => a,
+            None => return Err(JsValue::from("'From' key not fnd in message.")),
+        };
+
+        js_sys::Reflect::set(
+            &tx,
+            &"To".into(),
+            &("t".to_owned() + &to_addr[1..].to_string()).into(),
+        )?;
+        js_sys::Reflect::set(
+            &tx,
+            &"From".into(),
+            &("t".to_owned() + &from_addr[1..].to_string()).into(),
+        )?;
+    }
+
     Ok(tx)
 }
 
@@ -250,8 +275,17 @@ pub fn transaction_sign(
 pub fn transaction_sign_lotus(
     unsigned_tx_js: JsValue,
     private_key_js: JsValue,
-) -> Result<String, JsValue> {
+) -> Result<JsValue, JsValue> {
     set_panic_hook();
+
+    let testnet = match js_sys::Reflect::get(&unsigned_tx_js, &"To".into())?.as_string() {
+        Some(a) => a.starts_with("t"),
+        None => {
+            return Err(JsValue::from(
+                "'To' key not find in message. We cannot tell if it is testnet or mainnet",
+            ))
+        }
+    };
 
     let unsigned_message = unsigned_tx_js
         .into_serde()
@@ -269,10 +303,39 @@ pub fn transaction_sign_lotus(
     let signed_message = filecoin_signer::transaction_sign(&msg, &private_key_bytes)
         .map_err(|e| JsValue::from_str(format!("Error signing transaction: {}", e).as_str()))?;
 
-    let signed_message_lotus = serde_json::to_string(&MessageTxAPI::SignedMessage(signed_message))
-        .map_err(|e| JsValue::from_str(format!("Error converting into JSON: {}", e).as_str()))?;
+    let tx = JsValue::from_serde(&MessageTxAPI::SignedMessage(signed_message))
+        .map_err(|e| JsValue::from(e.to_string()))?;
 
-    Ok(signed_message_lotus)
+    if testnet {
+        let message = js_sys::Reflect::get(&tx, &"Message".into())?;
+
+        let to_addr = match js_sys::Reflect::get(&message, &"To".into())?.as_string() {
+            Some(a) => a,
+            None => return Err(JsValue::from("'To' key not find in message.")),
+        };
+        let from_addr = match js_sys::Reflect::get(&message, &"From".into())?.as_string() {
+            Some(a) => a,
+            None => return Err(JsValue::from("'From' key not find in message.")),
+        };
+
+        js_sys::Reflect::set(
+            &message,
+            &"To".into(),
+            &("t".to_owned() + &to_addr[1..].to_string()).into(),
+        )?;
+        js_sys::Reflect::set(
+            &message,
+            &"From".into(),
+            &("t".to_owned() + &from_addr[1..].to_string()).into(),
+        )?;
+
+        js_sys::Reflect::set(&tx, &"Message".into(), &message.into())?;
+    }
+
+    /*let signed_message_lotus = serde_json::to_string(&tx)
+    .map_err(|e| JsValue::from_str(format!("Error converting into JSON: {}", e).as_str()))?;*/
+
+    Ok(tx)
 }
 
 #[wasm_bindgen(js_name = transactionSignRaw)]
@@ -330,571 +393,6 @@ pub fn verify_signature(signature_js: JsValue, message_js: JsValue) -> Result<bo
 
     filecoin_signer::verify_signature(&sig, &message_bytes)
         .map_err(|e| JsValue::from_str(format!("Error verifying signature: {}", e).as_str()))
-}
-
-#[wasm_bindgen(js_name = createMultisigWithFee)]
-#[allow(clippy::too_many_arguments)]
-pub fn create_multisig_with_fee(
-    sender_address: String,
-    addresses: JsValue,
-    value: String,
-    required: i32,
-    nonce: u32,
-    duration: String,
-    start_epoch: String,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-    network: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let addresses_strings: Vec<String> = addresses
-        .into_serde()
-        .map_err(|e| JsValue::from(format!("Error converting addresses: {}", e)))?;
-
-    let se = start_epoch
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-    let d = duration
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let multisig_transaction = filecoin_signer::create_multisig(
-        sender_address,
-        addresses_strings,
-        value,
-        required as u64,
-        nonce as u64,
-        d,
-        se,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-        network,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error creating multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = createMultisig)]
-pub fn create_multisig(
-    sender_address: String,
-    addresses: JsValue,
-    value: String,
-    required: i32,
-    nonce: u32,
-    duration: String,
-    start_epoch: String,
-    network: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let addresses_strings: Vec<String> = addresses
-        .into_serde()
-        .map_err(|e| JsValue::from(format!("Error converting addresses: {}", e)))?;
-
-    let se = start_epoch
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-    let d = duration
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let multisig_transaction = filecoin_signer::create_multisig(
-        sender_address,
-        addresses_strings,
-        value,
-        required as u64,
-        nonce as u64,
-        d,
-        se,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-        network,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error creating multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = proposeMultisigWithFee)]
-#[allow(clippy::too_many_arguments)]
-pub fn propose_multisig_with_fee(
-    multisig_address: String,
-    to_address: String,
-    from_address: String,
-    amount: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-    method: u32,
-    params: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let multisig_transaction = filecoin_signer::proposal_multisig_message(
-        multisig_address,
-        to_address,
-        from_address,
-        amount,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-        method as u64,
-        params,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error porposing multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error porposing transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = proposeMultisig)]
-pub fn propose_multisig(
-    multisig_address: String,
-    to_address: String,
-    from_address: String,
-    amount: String,
-    nonce: u32,
-    method: u32,
-    params: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let multisig_transaction = filecoin_signer::proposal_multisig_message(
-        multisig_address,
-        to_address,
-        from_address,
-        amount,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-        method as u64,
-        params,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error porposing multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error porposing transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = approveMultisigWithFee)]
-#[allow(clippy::too_many_arguments)]
-pub fn approve_multisig_with_fee(
-    multisig_address: String,
-    message_id: i32,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let multisig_transaction = filecoin_signer::approve_multisig_message(
-        multisig_address,
-        message_id as i64,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error approving multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error approving transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = approveMultisig)]
-pub fn approve_multisig(
-    multisig_address: String,
-    message_id: i32,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u32,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let multisig_transaction = filecoin_signer::approve_multisig_message(
-        multisig_address,
-        message_id as i64,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error approving multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error approving transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = cancelMultisigWithFee)]
-#[allow(clippy::too_many_arguments)]
-pub fn cancel_multisig_with_fee(
-    multisig_address: String,
-    message_id: i32,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let multisig_transaction = filecoin_signer::cancel_multisig_message(
-        multisig_address,
-        message_id as i64,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error canceling multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error canceling transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = cancelMultisig)]
-pub fn cancel_multisig(
-    multisig_address: String,
-    message_id: i32,
-    proposer_address: String,
-    to_address: String,
-    amount: String,
-    from_address: String,
-    nonce: u32,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let multisig_transaction = filecoin_signer::cancel_multisig_message(
-        multisig_address,
-        message_id as i64,
-        proposer_address,
-        to_address,
-        amount,
-        from_address,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-    )
-    .map_err(|e| {
-        JsValue::from_str(format!("Error canceling multisig transaction: {}", e).as_str())
-    })?;
-
-    let multisig_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(multisig_transaction))
-        .map_err(|e| JsValue::from(format!("Error canceling transaction: {}", e)))?;
-
-    Ok(multisig_transaction_js)
-}
-
-#[wasm_bindgen(js_name = createPymtChanWithFee)]
-pub fn create_pymtchan_with_fee(
-    from_address: String,
-    to_address: String,
-    amount: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-    network: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let pch_transaction = filecoin_signer::create_pymtchan(
-        from_address,
-        to_address,
-        amount,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-        network,
-    )
-    .map_err(|e| JsValue::from_str(format!("Error creating payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = createPymtChan)]
-pub fn create_pymtchan(
-    from_address: String,
-    to_address: String,
-    amount: String,
-    nonce: u32,
-    network: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let pch_transaction = filecoin_signer::create_pymtchan(
-        from_address,
-        to_address,
-        amount,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-        network,
-    )
-    .map_err(|e| JsValue::from_str(format!("Error creating payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = settlePymtChanWithFee)]
-pub fn settle_pymtchan_with_fee(
-    pch_address: String,
-    from_address: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let pch_transaction = filecoin_signer::settle_pymtchan(
-        pch_address,
-        from_address,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = settlePymtChan)]
-pub fn settle_pymtchan(
-    pch_address: String,
-    from_address: String,
-    nonce: u32,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let pch_transaction = filecoin_signer::settle_pymtchan(
-        pch_address,
-        from_address,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = collectPymtChanWithFee)]
-pub fn collect_pymtchan_with_fee(
-    pch_address: String,
-    from_address: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let pch_transaction = filecoin_signer::collect_pymtchan(
-        pch_address,
-        from_address,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = collectPymtChan)]
-pub fn collect_pymtchan(
-    pch_address: String,
-    from_address: String,
-    nonce: u32,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    let pch_transaction = filecoin_signer::collect_pymtchan(
-        pch_address,
-        from_address,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = updatePymtChanWithFee)]
-pub fn update_pymtchan_with_fee(
-    pch_address: String,
-    from_address: String,
-    signed_voucher: String,
-    nonce: u32,
-    gas_limit: String,
-    gas_fee_cap: String,
-    gas_premium: String,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    // TODO: verify if `pch_address` is an actor address. Not needed but good improvement.
-
-    let gl = gas_limit
-        .parse::<i64>()
-        .map_err(|e| JsValue::from(format!("Error converting to i64: {}", e)))?;
-
-    let pch_transaction = filecoin_signer::update_pymtchan(
-        pch_address,
-        from_address,
-        signed_voucher,
-        nonce as u64,
-        gl,
-        gas_fee_cap,
-        gas_premium,
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
-}
-
-#[wasm_bindgen(js_name = updatePymtChan)]
-pub fn update_pymtchan(
-    pch_address: String,
-    from_address: String,
-    signed_voucher: String,
-    nonce: u32,
-) -> Result<JsValue, JsValue> {
-    set_panic_hook();
-
-    // TODO: verify if `pch_address` is an actor address. Not needed but good improvement.
-
-    let pch_transaction = filecoin_signer::update_pymtchan(
-        pch_address,
-        from_address,
-        signed_voucher,
-        nonce as u64,
-        0,
-        "0".to_string(),
-        "0".to_string(),
-    )
-    .map_err(|e| JsValue::from_str(format!("Error collecting payment channel: {}", e).as_str()))?;
-
-    let pch_transaction_js = JsValue::from_serde(&MessageTxAPI::Message(pch_transaction))
-        .map_err(|e| JsValue::from(format!("Error creating transaction: {}", e)))?;
-
-    Ok(pch_transaction_js)
 }
 
 #[wasm_bindgen(js_name = signVoucher)]

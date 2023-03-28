@@ -1,9 +1,13 @@
 /* eslint-disable no-console */
-const bip32 = require('bip32')
-const bip39 = require('bip39')
-const secp256k1 = require('secp256k1')
-const assert = require('assert')
-const utils = require('./utils')
+import bip39 from 'bip39'
+import secp256k1 from 'secp256k1'
+import * as bip32Default from 'bip32'
+import * as ecc from 'tiny-secp256k1';
+import assert from 'assert'
+
+import * as utils from './utils.js'
+
+const bip32 = bip32Default.BIP32Factory(ecc)
 
 /* TODO: rename as a generate file and not test */
 
